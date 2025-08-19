@@ -128,7 +128,7 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
     );
   }
 
-  // Al pulsar "Terminé", calcula los porcentajes, apaga la cámara y muestra resultados
+  // Al pulsar "Terminé", calcula los porcentajes, apaga la cámara, muestra resultados y ENVÍA AL BACKEND
   const handleFinish = () => {
     setMonitoring(false);
     stopCamera();
@@ -144,6 +144,22 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
       { nombre: 'PERCLOS', valor: perclosPct },
     ];
     const mejor = valores.reduce((a, b) => (a.valor > b.valor ? a : b)).nombre;
+
+    // Enviar resultados al backend Django
+    fetch('http://localhost:8000/api/resultados/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        documento: documentKey,
+        ear: earPct,
+        headPose: headPosePct,
+        perclos: perclosPct,
+        mejor: mejor
+      })
+    })
+      .then(res => res.json())
+      .then(data => console.log('Respuesta del backend:', data))
+      .catch(err => console.error('Error al enviar resultados:', err));
 
     setResults({
       ear: earPct,
