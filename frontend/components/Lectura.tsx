@@ -3,24 +3,53 @@
 // frontend/components/Lectura.tsx
 import React, { useRef, useEffect, useState } from 'react';
 import * as faceapi from 'face-api.js';
+import { documentos, DocKey } from './documentos';
 
-const Lectura: React.FC = () => {
+// Define las props que recibe el componente
+interface LecturaProps {
+  documentKey: DocKey;
+  onVolver?: () => void; // Nueva prop opcional para volver
+}
+
+// Umbrales para los algoritmos
+const EAR_THRESHOLD = 0.3; // Ojo abierto si EAR > 0.3
+const HEADPOSE_THRESHOLD = 15; // Grados de desviación aceptable
+
+const VIDEO_WIDTH = 480;
+const VIDEO_HEIGHT = 360;
+
+const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [ear, setEar] = useState(0);
-  const [headPose, setHeadPose] = useState(0);
-  const [perclos, setPerclos] = useState(0);
 
+  // Estados para el monitoreo y resultados
+  const [monitoring, setMonitoring] = useState(true);
+  const [results, setResults] = useState<{
+    ear: number;
+    headPose: number;
+    perclos: number;
+    mejor: string;
+  } | null>(null);
+
+  // Contadores para los algoritmos
+  const totalFrames = useRef(0);
+  const earOpenFrames = useRef(0);
+  const headPoseGoodFrames = useRef(0);
+  const eyeClosedFrames = useRef(0);
+
+  // Cargar modelos y solicitar webcam
   useEffect(() => {
     const loadModels = async () => {
-      const MODEL_URL = '/models';
-      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
-      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      // Carga los modelos desde las subcarpetas correctas
+      await faceapi.nets.tinyFaceDetector.loadFromUri('/models/tiny_face_detector');
+      await faceapi.nets.faceLandmark68Net.loadFromUri('/models/face_landmark_68');
       startVideo();
     };
 
     const startVideo = () => {
-      navigator.mediaDevices.getUserMedia({ video: true })
+      navigator.mediaDevices.getUserMedia({
+        video: { width: VIDEO_WIDTH, height: VIDEO_HEIGHT }
+      })
         .then((stream) => {
           if (videoRef.current) videoRef.current.srcObject = stream;
         })
@@ -30,55 +59,189 @@ const Lectura: React.FC = () => {
     loadModels();
   }, []);
 
+  // Procesar frames de la webcam y calcular métricas
   useEffect(() => {
-    let frameCount = 0;
-    const interval = setInterval(async () => {
-      if (videoRef.current && canvasRef.current && ++frameCount % 5 === 0) { // ~5 fps
-        const detections = await faceapi.detectAllFaces(videoRef.current, new faceapi.TinyFaceDetectorOptions())
-          .withFaceLandmarks()
-          .withFaceExpressions();
-        const context = canvasRef.current.getContext('2d');
-        if (context && detections.length > 0) {
-          context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-          faceapi.draw.drawDetections(canvasRef.current, detections);
+    if (!monitoring) return;
+    let interval: NodeJS.Timeout;
 
-          const landmarks = detections[0].landmarks;
-          // EAR básico (simplificado, necesita ajuste con fórmulas exactas)
-          const leftEye = landmarks.getLeftEye();
-          const rightEye = landmarks.getRightEye();
-          const earValue = (leftEye[1].y - leftEye[4].y) / (2 * (leftEye[0].x - leftEye[3].x)); // Aproximación
-          setEar(earValue > 0.3 ? 100 : 0);
+    const processFrame = async () => {
+      if (!videoRef.current || !canvasRef.current) return;
+      const detections = await faceapi
+        .detectSingleFace(videoRef.current, new faceapi.TinyFaceDetectorOptions())
+        .withFaceLandmarks();
 
-          // Head Pose (placeholder, necesita ángulos reales)
-          setHeadPose(Math.random() * 100);
+      const context = canvasRef.current.getContext('2d');
+      context?.clearRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
 
-          // PERCLOS (placeholder, necesita tiempo de cierre)
-          setPerclos(Math.random() * 100);
+      if (detections && detections.landmarks) {
+        // Dibuja la detección y los landmarks sobre el canvas
+        faceapi.draw.drawDetections(canvasRef.current, [detections]);
+        faceapi.draw.drawFaceLandmarks(canvasRef.current, [detections]);
+
+        totalFrames.current++;
+
+        // EAR (Eye Aspect Ratio)
+        const leftEAR = computeEAR(detections.landmarks.getLeftEye());
+        const rightEAR = computeEAR(detections.landmarks.getRightEye());
+        const avgEAR = (leftEAR + rightEAR) / 2;
+        if (avgEAR > EAR_THRESHOLD) {
+          earOpenFrames.current++;
+        } else {
+          eyeClosedFrames.current++;
+        }
+
+        // Head Pose (estimación simple usando nariz)
+        const nose = detections.landmarks.getNose();
+        const jaw = detections.landmarks.getJawOutline();
+        // Centro horizontal de la cara
+        const faceCenterX = (jaw[0].x + jaw[16].x) / 2;
+        // Desviación de la nariz respecto al centro de la cara
+        const noseX = nose[3].x;
+        const deviation = Math.abs(noseX - faceCenterX);
+        // Si la desviación es pequeña, se considera atención
+        if (deviation < HEADPOSE_THRESHOLD) {
+          headPoseGoodFrames.current++;
         }
       }
-    }, 200);
+    };
+
+    interval = setInterval(processFrame, 200); // 5 fps aprox.
+
     return () => clearInterval(interval);
-  }, []);
+  }, [monitoring]);
+
+  // Función para calcular EAR de un ojo
+  function computeEAR(eye: faceapi.Point[]) {
+    // EAR = (||p2-p6|| + ||p3-p5||) / (2*||p1-p4||)
+    const dist = (a: faceapi.Point, b: faceapi.Point) =>
+      Math.hypot(a.x - b.x, a.y - b.y);
+    return (
+      (dist(eye[1], eye[5]) + dist(eye[2], eye[4])) /
+      (2.0 * dist(eye[0], eye[3]))
+    );
+  }
+
+  // Al pulsar "Terminé", calcula los porcentajes y muestra resultados
+  const handleFinish = () => {
+    setMonitoring(false);
+
+    const total = totalFrames.current || 1; // Evita división por cero
+    const earPct = (earOpenFrames.current / total) * 100;
+    const headPosePct = (headPoseGoodFrames.current / total) * 100;
+    const perclosPct = 100 - ((eyeClosedFrames.current / total) * 100);
+
+    // Determina el mejor algoritmo
+    const valores = [
+      { nombre: 'EAR', valor: earPct },
+      { nombre: 'Head Pose', valor: headPosePct },
+      { nombre: 'PERCLOS', valor: perclosPct },
+    ];
+    const mejor = valores.reduce((a, b) => (a.valor > b.valor ? a : b)).nombre;
+
+    setResults({
+      ear: earPct,
+      headPose: headPosePct,
+      perclos: perclosPct,
+      mejor,
+    });
+  };
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
       <h1 className="text-2xl font-bold text-gray-800 mb-4">Pantalla de Lectura</h1>
       <div className="w-full max-w-lg">
-        <div style={{ position: 'relative' }}>
-          <video ref={videoRef} autoPlay muted style={{ width: '100%' }} />
-          <canvas ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%' }} />
+        {/* Webcam y canvas para mostrar detecciones */}
+        <div
+          style={{
+            position: 'relative',
+            width: VIDEO_WIDTH,
+            height: VIDEO_HEIGHT,
+            margin: '0 auto',
+          }}
+        >
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            width={VIDEO_WIDTH}
+            height={VIDEO_HEIGHT}
+            style={{
+              width: VIDEO_WIDTH,
+              height: VIDEO_HEIGHT,
+              objectFit: 'cover',
+              background: '#000',
+              borderRadius: '8px',
+              display: 'block',
+            }}
+          />
+          <canvas
+            ref={canvasRef}
+            width={VIDEO_WIDTH}
+            height={VIDEO_HEIGHT}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: VIDEO_WIDTH,
+              height: VIDEO_HEIGHT,
+              pointerEvents: 'none',
+              borderRadius: '8px',
+            }}
+          />
         </div>
+        {/* Texto del documento seleccionado */}
         <div className="mt-4 p-4 bg-white rounded-md overflow-auto" style={{ maxHeight: '400px' }}>
-          <p>Texto de ejemplo (scroll si es extenso)... Lorem ipsum dolor sit amet...</p>
+          <p style={{ whiteSpace: 'pre-line', color: '#111' }}>{documentos[documentKey]}</p>
         </div>
-        <button className="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 mt-4">
-          Terminé
-        </button>
-        <div className="mt-4">
-          <p>EAR: {ear.toFixed(2)}%</p>
-          <p>Head Pose: {headPose.toFixed(2)}%</p>
-          <p>PERCLOS: {perclos.toFixed(2)}%</p>
-        </div>
+        {/* Botón para finalizar la lectura */}
+        {!results && (
+          <button
+            className="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 mt-4"
+            onClick={handleFinish}
+          >
+            Terminé
+          </button>
+        )}
+        {/* Resultados finales */}
+        {results && (
+          <div className="mt-6 bg-white rounded-md p-4 shadow">
+            <h2 className="text-lg font-bold mb-2 text-gray-800">Resultados de Atención</h2>
+            <table className="w-full text-center border border-gray-300">
+              <thead>
+                <tr>
+                  <th className="border border-gray-300 px-2 py-1 text-gray-800 bg-gray-100">Algoritmo</th>
+                  <th className="border border-gray-300 px-2 py-1 text-gray-800 bg-gray-100">Porcentaje</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className={results.mejor === 'EAR' ? 'bg-green-200 font-bold text-gray-900' : 'text-gray-900'}>
+                  <td className="border border-gray-300 px-2 py-1">EAR</td>
+                  <td className="border border-gray-300 px-2 py-1">{results.ear.toFixed(2)}%</td>
+                </tr>
+                <tr className={results.mejor === 'Head Pose' ? 'bg-green-200 font-bold text-gray-900' : 'text-gray-900'}>
+                  <td className="border border-gray-300 px-2 py-1">Head Pose</td>
+                  <td className="border border-gray-300 px-2 py-1">{results.headPose.toFixed(2)}%</td>
+                </tr>
+                <tr className={results.mejor === 'PERCLOS' ? 'bg-green-200 font-bold text-gray-900' : 'text-gray-900'}>
+                  <td className="border border-gray-300 px-2 py-1">PERCLOS</td>
+                  <td className="border border-gray-300 px-2 py-1">{results.perclos.toFixed(2)}%</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className="mt-4 text-green-700 font-bold">
+              Mejor algoritmo: {results.mejor}
+            </p>
+            {/* Botón para volver a leer otro documento */}
+            {onVolver && (
+              <button
+                className="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 mt-4"
+                onClick={onVolver}
+              >
+                Volver a leer otro documento
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
