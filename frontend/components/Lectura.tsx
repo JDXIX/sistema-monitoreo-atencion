@@ -1,6 +1,5 @@
 "use client";
 
-// frontend/components/Lectura.tsx
 import React, { useRef, useEffect, useState } from 'react';
 import * as faceapi from 'face-api.js';
 import { documentos, DocKey } from './documentos';
@@ -8,7 +7,7 @@ import { documentos, DocKey } from './documentos';
 // Define las props que recibe el componente
 interface LecturaProps {
   documentKey: DocKey;
-  onVolver?: () => void; // Nueva prop opcional para volver
+  onVolver?: () => void; // Prop opcional para volver al inicio
 }
 
 // Umbrales para los algoritmos
@@ -37,10 +36,18 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
   const headPoseGoodFrames = useRef(0);
   const eyeClosedFrames = useRef(0);
 
+  // Función para apagar la cámara
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+  };
+
   // Cargar modelos y solicitar webcam
   useEffect(() => {
     const loadModels = async () => {
-      // Carga los modelos desde las subcarpetas correctas
       await faceapi.nets.tinyFaceDetector.loadFromUri('/models/tiny_face_detector');
       await faceapi.nets.faceLandmark68Net.loadFromUri('/models/face_landmark_68');
       startVideo();
@@ -57,6 +64,11 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
     };
 
     loadModels();
+
+    // Cleanup: Detener la cámara al desmontar el componente
+    return () => {
+      stopCamera();
+    };
   }, []);
 
   // Procesar frames de la webcam y calcular métricas
@@ -74,7 +86,6 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
       context?.clearRect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT);
 
       if (detections && detections.landmarks) {
-        // Dibuja la detección y los landmarks sobre el canvas
         faceapi.draw.drawDetections(canvasRef.current, [detections]);
         faceapi.draw.drawFaceLandmarks(canvasRef.current, [detections]);
 
@@ -93,12 +104,9 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
         // Head Pose (estimación simple usando nariz)
         const nose = detections.landmarks.getNose();
         const jaw = detections.landmarks.getJawOutline();
-        // Centro horizontal de la cara
         const faceCenterX = (jaw[0].x + jaw[16].x) / 2;
-        // Desviación de la nariz respecto al centro de la cara
         const noseX = nose[3].x;
         const deviation = Math.abs(noseX - faceCenterX);
-        // Si la desviación es pequeña, se considera atención
         if (deviation < HEADPOSE_THRESHOLD) {
           headPoseGoodFrames.current++;
         }
@@ -112,7 +120,6 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
 
   // Función para calcular EAR de un ojo
   function computeEAR(eye: faceapi.Point[]) {
-    // EAR = (||p2-p6|| + ||p3-p5||) / (2*||p1-p4||)
     const dist = (a: faceapi.Point, b: faceapi.Point) =>
       Math.hypot(a.x - b.x, a.y - b.y);
     return (
@@ -121,16 +128,16 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
     );
   }
 
-  // Al pulsar "Terminé", calcula los porcentajes y muestra resultados
+  // Al pulsar "Terminé", calcula los porcentajes, apaga la cámara y muestra resultados
   const handleFinish = () => {
     setMonitoring(false);
+    stopCamera();
 
     const total = totalFrames.current || 1; // Evita división por cero
     const earPct = (earOpenFrames.current / total) * 100;
     const headPosePct = (headPoseGoodFrames.current / total) * 100;
     const perclosPct = 100 - ((eyeClosedFrames.current / total) * 100);
 
-    // Determina el mejor algoritmo
     const valores = [
       { nombre: 'EAR', valor: earPct },
       { nombre: 'Head Pose', valor: headPosePct },
@@ -144,6 +151,12 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
       perclos: perclosPct,
       mejor,
     });
+  };
+
+  // Al volver a leer otro documento, apaga la cámara antes de volver
+  const handleVolverClick = () => {
+    stopCamera();
+    if (onVolver) onVolver();
   };
 
   return (
@@ -235,7 +248,7 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
             {onVolver && (
               <button
                 className="w-full bg-blue-500 text-white py-2 px-4 rounded-md hover:bg-blue-600 mt-4"
-                onClick={onVolver}
+                onClick={handleVolverClick}
               >
                 Volver a leer otro documento
               </button>
