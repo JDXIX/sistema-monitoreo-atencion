@@ -13,6 +13,7 @@ interface LecturaProps {
 // Umbrales para los algoritmos
 const EAR_THRESHOLD = 0.3; // Ojo abierto si EAR > 0.3
 const HEADPOSE_THRESHOLD = 15; // Grados de desviación aceptable
+const MOR_THRESHOLD = 25; // Ajusta este valor según tus pruebas
 
 const VIDEO_WIDTH = 480;
 const VIDEO_HEIGHT = 360;
@@ -26,7 +27,7 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
   const [results, setResults] = useState<{
     ear: number;
     headPose: number;
-    perclos: number;
+    mor: number;
     mejor: string;
   } | null>(null);
 
@@ -34,7 +35,7 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
   const totalFrames = useRef(0);
   const earOpenFrames = useRef(0);
   const headPoseGoodFrames = useRef(0);
-  const eyeClosedFrames = useRef(0);
+  const mouthClosedFrames = useRef(0);
 
   // Función para apagar la cámara
   const stopCamera = () => {
@@ -97,8 +98,6 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
         const avgEAR = (leftEAR + rightEAR) / 2;
         if (avgEAR > EAR_THRESHOLD) {
           earOpenFrames.current++;
-        } else {
-          eyeClosedFrames.current++;
         }
 
         // Head Pose (estimación simple usando nariz)
@@ -109,6 +108,16 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
         const deviation = Math.abs(noseX - faceCenterX);
         if (deviation < HEADPOSE_THRESHOLD) {
           headPoseGoodFrames.current++;
+        }
+
+        // Mouth Opening Ratio (MOR)
+        const mouth = detections.landmarks.getMouth();
+        const mor = computeMOR(mouth);
+        // Muestra el valor de MOR en consola para calibrar el umbral
+        console.log('MOR actual:', mor);
+        // Considera "atención" si la boca está cerrada (MOR < threshold)
+        if (mor < MOR_THRESHOLD) {
+          mouthClosedFrames.current++;
         }
       }
     };
@@ -128,6 +137,12 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
     );
   }
 
+  // Función para calcular MOR: distancia vertical entre labio superior (punto 51) e inferior (punto 57)
+  function computeMOR(mouth: faceapi.Point[]) {
+    // mouth[3] = punto 51, mouth[9] = punto 57
+    return Math.hypot(mouth[3].x - mouth[9].x, mouth[3].y - mouth[9].y);
+  }
+
   // Al pulsar "Terminé", calcula los porcentajes, apaga la cámara, muestra resultados y ENVÍA AL BACKEND
   const handleFinish = () => {
     setMonitoring(false);
@@ -136,12 +151,12 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
     const total = totalFrames.current || 1; // Evita división por cero
     const earPct = (earOpenFrames.current / total) * 100;
     const headPosePct = (headPoseGoodFrames.current / total) * 100;
-    const perclosPct = 100 - ((eyeClosedFrames.current / total) * 100);
+    const morPct = (mouthClosedFrames.current / total) * 100;
 
     const valores = [
       { nombre: 'EAR', valor: earPct },
       { nombre: 'Head Pose', valor: headPosePct },
-      { nombre: 'PERCLOS', valor: perclosPct },
+      { nombre: 'MOR', valor: morPct },
     ];
     const mejor = valores.reduce((a, b) => (a.valor > b.valor ? a : b)).nombre;
 
@@ -153,7 +168,7 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
         documento: documentKey,
         ear: earPct,
         headPose: headPosePct,
-        perclos: perclosPct,
+        mor: morPct,
         mejor: mejor
       })
     })
@@ -164,7 +179,7 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
     setResults({
       ear: earPct,
       headPose: headPosePct,
-      perclos: perclosPct,
+      mor: morPct,
       mejor,
     });
   };
@@ -251,14 +266,19 @@ const Lectura: React.FC<LecturaProps> = ({ documentKey, onVolver }) => {
                   <td className="border border-gray-300 px-2 py-1">Head Pose</td>
                   <td className="border border-gray-300 px-2 py-1">{results.headPose.toFixed(2)}%</td>
                 </tr>
-                <tr className={results.mejor === 'PERCLOS' ? 'bg-green-200 font-bold text-gray-900' : 'text-gray-900'}>
-                  <td className="border border-gray-300 px-2 py-1">PERCLOS</td>
-                  <td className="border border-gray-300 px-2 py-1">{results.perclos.toFixed(2)}%</td>
+                <tr className={results.mejor === 'MOR' ? 'bg-green-200 font-bold text-gray-900' : 'text-gray-900'}>
+                  <td className="border border-gray-300 px-2 py-1">Mouth Opening Ratio</td>
+                  <td className="border border-gray-300 px-2 py-1">{results.mor.toFixed(2)}%</td>
                 </tr>
               </tbody>
             </table>
             <p className="mt-4 text-green-700 font-bold">
-              Mejor algoritmo: {results.mejor}
+            {`En este monitoreo, el mejor algoritmo es ${results.mejor} porque obtuvo el mayor nivel de atención registrado durante la lectura, alcanzando un porcentaje de ${(() => {
+                if (results.mejor === 'EAR') return results.ear.toFixed(2);
+                if (results.mejor === 'Head Pose') return results.headPose.toFixed(2);
+                if (results.mejor === 'MOR') return results.mor.toFixed(2);
+                return '';
+            })()}%.`}
             </p>
             {/* Botón para volver a leer otro documento */}
             {onVolver && (

@@ -11,6 +11,12 @@ class ResultadosAtencionView(APIView):
     def post(self, request):
         # Imprime los datos recibidos para depuración (puedes quitar esto en producción)
         print("Datos recibidos:", request.data)
+        # Ejemplo de acceso a los campos esperados:
+        # documento = request.data.get('documento')
+        # ear = request.data.get('ear')
+        # head_pose = request.data.get('headPose')
+        # mor = request.data.get('mor')
+        # mejor = request.data.get('mejor')
         # Devuelve una respuesta de éxito
         return Response(
             {"mensaje": "Resultados recibidos correctamente."},
